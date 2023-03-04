@@ -43,7 +43,6 @@ def gaussderiv(img):
 
 def gausssdiff(img1, img2):
     diff = cv2.subtract(img1, img2)
-    print(np.mean(diff))
     return diff
 
 

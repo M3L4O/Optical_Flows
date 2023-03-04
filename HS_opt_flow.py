@@ -1,58 +1,97 @@
-import os
+import cv2
 import numpy as np
-import cv2 as cv
-from argparse import ArgumentParser
-from ..utils.tools import draw_quiver, get_derivatives
+from pyoptflow import HornSchunck
+from os import path as ph
+from utils.tools import calculate_derivatives, get_channel_permutations
+from matplotlib import pyplot as plt
 
 
+def generate_xy_indices_list(w, h):
+    X = np.tile(np.arange(w), (1, h))[0]
+    Y = np.repeat(np.arange(h), w)
 
-def horn_schunk(path1, path2, alpha, max_err):
-    img1 = cv.imread(path1, cv.IMREAD_GRAYSCALE).astype(float)
-    img2 = cv.imread(path2, cv.IMREAD_GRAYSCALE).astype(float)
+    return X, Y
 
-    img1 = cv.resize(img1, (1920, 1080))
-    img2 = cv.resize(img2, (1920, 1080))
 
-    
-    # set up initial values
-    u = np.zeros(img1.shape)
-    v = np.zeros(img1.shape)
-    fx, fy, ft = get_derivatives(img1, img2)
-    avg_kernel = np.array(
-        [[1 / 12, 1 / 6, 1 / 12], [1 / 6, -1, 1 / 6], [1 / 12, 1 / 6, 1 / 12]], float
-    )
+def apply_horn_schunck(frame_1, frame_2, alpha=4, niter=100, generate_xy=True):
+    U, V = HornSchunck(frame_1, frame_2, alpha=alpha, Niter=niter)
 
-    avg_kernel = cv.flip(avg_kernel, -1)
-    d = alpha**2 + fx**2 + fy**2
+    h, w = frame_1.shape
 
-    iter_cnt = 0
-    while True:
-        iter_cnt += 1
+    U = U.flatten()
+    V = V.flatten()
 
-        u_avg = cv.filter2D(u, -1, avg_kernel)
-        v_avg = cv.filter2D(v, -1, avg_kernel)
+    X, Y = generate_xy_indices_list(w, h) if generate_xy else ([], [])
 
-        p = fx * u_avg + fy * v_avg + ft
+    return X, Y, U, V
 
-        prev = u
-        u = u_avg - fx * p / d
-        v = v_avg - fy * p / d
 
-        diff = ((u - prev) ** 2).mean()
-        if diff < max_err or iter_cnt > 300:
-            break
+def apply_horn_shunck_multichannel(frame_1, frame_2, alpha=75, niter=100):
+    prev_channels = cv2.split(frame_1)
+    next_channels = cv2.split(frame_2)
 
-    draw_quiver(u, v, img1)
+    h, w, _ = frame_1.shape
 
-    return [u, v]
+    X, Y = generate_xy_indices_list(w, h)
+    U = np.zeros_like(X, np.float32)
+    V = np.zeros_like(U)
+    mag = np.zeros_like(U)
+
+    for prev, next in zip(prev_channels, next_channels):
+        _, _, u, v = apply_horn_schunck(prev, next, alpha, niter, False)
+        new_mag = cv2.magnitude(u, v).flatten()
+        indices = np.where(new_mag > mag)[0]
+
+        if indices.size > 0:
+            mag[indices] = new_mag[indices]
+            U[indices] = u[indices]
+            V[indices] = v[indices]
+
+    return X, Y, U, V
+
+
+def clean_results(image, U, V, N):
+    U = np.reshape(U, (image.shape[1], image.shape[0]))
+    V = np.reshape(V, (image.shape[1], image.shape[0]))
+    _X, _Y, _U, _V = [], [], [], []
+    for x in range(0, image.shape[1] - N, N):
+        for y in range(0, image.shape[0] - N, N):
+            _X.append(x)
+            _Y.append(y)
+            _U.append(U[x, y])
+            _V.append(V[x, y])
+    return _X, _Y, _U, _V
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Horn Schunck program")
-    parser.add_argument("img1", type=str, help="First image name (include format)")
-    parser.add_argument("img2", type=str, help="Second image name (include format)")
-    args = parser.parse_args()
+    from glob import glob
+    from sys import argv
 
-    img1, img2 = os.path.abspath(args.img1), os.path.abspath(args.img2)
+    images_dir = ph.join("./", argv[1])
+    images = sorted(glob(ph.join(images_dir, "*")))
+    img1, img2 = cv2.imread(images[30]), cv2.imread(images[31])
 
-    u, v = horn_schunk(img1, img2, alpha=35, max_err=10e-1)
+    window_size = 10
+    images1 = get_channel_permutations(img1)
+    images2 = get_channel_permutations(img2)
+
+    background = np.full(img1.shape, 255)
+    # fig = plt.figure()
+    X, Y, u, v = apply_horn_shunck_multichannel(img1, img2, window_size)
+    X, Y, u, v = clean_results(img1, u, v, window_size)
+    plt.imshow(background)
+    plt.quiver(X, Y, u, v, color="black", scale=1000, pivot="mid")
+    plt.show()
+
+    # for (key1, image1), (key2, image2) in zip(images1.items(), images2.items()):
+    #     print(key1, key2)
+    #
+    #     fig = plt.figure()
+    #     u, v, X, Y = apply_horn_shunck_multichannel(image1, image2)
+    #     plt.imshow(background)
+    #     plt.quiver(X, Y, -u, -v, color="black", scale=1, pivot="mid")
+    #     plt.savefig(
+    #         f"plots/LK_{key1}_images_{ph.basename(images[0]).split('.')[0]}.png",
+    #         dpi=100,
+    #     )
+    #     plt.show()
